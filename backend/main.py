@@ -47,11 +47,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_TIMEOUT = 20.0
 GEMINI_MODEL = "gemini-2.0-flash-001"
 
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
-XAI_TIMEOUT = 20.0
-XAI_MODEL = os.getenv("XAI_MODEL", "grok-3-mini")
-XAI_API_URL = "https://api.x.ai/v1/chat/completions"
-
 AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").strip().lower()
 
 # Indicative economics (NOT validated market rates) used for INR loss illustration.
@@ -375,7 +370,7 @@ def _risk_level(score: float) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Advisory (Gemini + Grok + fallback)
+# Advisory (Gemini + fallback)
 # --------------------------------------------------------------------------- #
 
 
@@ -504,66 +499,9 @@ def _try_gemini_advisory(req: AdvisoryRequest, fallback: dict[str, Any]) -> dict
         return fallback
 
 
-def _try_grok_advisory(req: AdvisoryRequest, fallback: dict[str, Any]) -> dict[str, Any]:
-    """Attempt Grok (xAI); on any failure return the fallback advisory."""
-    if not XAI_API_KEY:
-        logger.warning("XAI_API_KEY not set – cannot use Grok provider.")
-        return fallback
-
-    summary = fallback["summary"]
-    prompt = _build_advisory_prompt(req, summary)
-
-    try:
-        with httpx.Client(timeout=XAI_TIMEOUT) as client:
-            resp = client.post(
-                XAI_API_URL,
-                headers={
-                    "Authorization": f"Bearer {XAI_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": XAI_MODEL,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are an agronomy assistant. Return only valid JSON, no markdown.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.7,
-                    "max_tokens": 800,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        text = data["choices"][0]["message"]["content"]
-    except Exception as exc:
-        logger.warning("Grok advisory failed (%s) – using fallback.", type(exc).__name__)
-        return fallback
-
-    try:
-        clean = text.strip()
-        if clean.startswith("```"):
-            clean = clean.split("\n", 1)[1] if "\n" in clean else clean
-            clean = clean.rsplit("```", 1)[0]
-        parsed = json.loads(clean)
-        if not all(k in parsed for k in ("summary", "recommendations_en", "recommendations_te")):
-            raise ValueError("missing keys")
-        if not (isinstance(parsed["recommendations_en"], list) and isinstance(parsed["recommendations_te"], list)):
-            raise ValueError("recommendations must be lists")
-        parsed["source"] = "grok"
-        return parsed
-    except Exception:
-        logger.warning("Grok returned unparseable JSON – using fallback advisory.")
-        return fallback
-
-
 def _try_ai_advisory(req: AdvisoryRequest, fallback: dict[str, Any]) -> dict[str, Any]:
     """Route to the configured AI provider; fall back if the key is missing or the call fails."""
     provider = AI_PROVIDER
-    if provider == "grok":
-        logger.info("Advisory provider: grok")
-        return _try_grok_advisory(req, fallback)
     if provider == "gemini":
         logger.info("Advisory provider: gemini")
         return _try_gemini_advisory(req, fallback)
@@ -601,7 +539,6 @@ async def health() -> dict[str, Any]:
         "models_trained": list(MODELS.keys()),
         "ai_provider": AI_PROVIDER,
         "gemini_configured": bool(GEMINI_API_KEY),
-        "grok_configured": bool(XAI_API_KEY),
         "cors_origins": CORS_ORIGINS,
     }
 
