@@ -47,6 +47,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_TIMEOUT = 20.0
 GEMINI_MODEL = "gemini-2.0-flash-001"
 
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+XAI_TIMEOUT = 20.0
+XAI_MODEL = os.getenv("XAI_MODEL", "grok-3-mini")
+XAI_API_URL = "https://api.x.ai/v1/chat/completions"
+
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").strip().lower()
+
 # Indicative economics (NOT validated market rates) used for INR loss illustration.
 INDICATIVE_YIELD_PER_ACRE = {
     "paddy": 2400,    # kg/acre baseline
@@ -263,6 +270,8 @@ async def fetch_open_meteo_forecast(lat: float, lon: float) -> dict[str, Any]:
             "precipitation_sum",
             "temperature_2m_max",
             "et0_fao_evapotranspiration",
+        ],
+        "hourly": [
             "soil_moisture_0_to_1cm",
         ],
         "timezone": "Asia/Kolkata",
@@ -279,8 +288,11 @@ def _summarise_forecast(data: dict[str, Any]) -> dict[str, Any]:
     precip = daily.get("precipitation_sum", []) or []
     t_max = daily.get("temperature_2m_max", []) or []
     et0 = daily.get("et0_fao_evapotranspiration", []) or []
-    sm = daily.get("soil_moisture_0_to_1cm", []) or []
     dates = daily.get("time", []) or []
+
+    hourly = data.get("hourly", {})
+    sm_hourly = hourly.get("soil_moisture_0_to_1cm", []) or []
+    sm_times = hourly.get("time", []) or []
 
     def _safe(vals: list, agg: str) -> float:
         clean = [v for v in vals if v is not None]
@@ -298,14 +310,28 @@ def _summarise_forecast(data: dict[str, Any]) -> dict[str, Any]:
     t_max_avg = _safe(t_max, "avg")
     t_max_peak = _safe(t_max, "max")
     et0_sum = _safe(et0, "sum")
-    sm_avg = _safe(sm, "avg")
+    sm_avg = _safe(sm_hourly, "avg")
+
+    # Build per-day soil moisture averages from hourly readings.
+    sm_by_day: list[float | None] = []
+    if sm_times and sm_hourly:
+        from collections import defaultdict
+        day_buckets: dict[str, list[float]] = defaultdict(list)
+        for ts, val in zip(sm_times, sm_hourly):
+            if val is not None and ts:
+                day_buckets[ts[:10]].append(float(val))
+        for d in dates:
+            vals = day_buckets.get(d, [])
+            sm_by_day.append(round(sum(vals) / len(vals), 4) if vals else None)
+    else:
+        sm_by_day = [None] * len(dates)
 
     return {
         "dates": dates,
         "daily_precipitation": precip,
         "daily_temp_max": t_max,
         "daily_et0": et0,
-        "daily_soil_moisture": sm,
+        "daily_soil_moisture": sm_by_day,
         "total_rainfall": round(total_rainfall, 2),
         "avg_temp_max": round(t_max_avg, 2),
         "peak_temp_max": round(t_max_peak, 2),
@@ -349,7 +375,7 @@ def _risk_level(score: float) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Advisory (Gemini + fallback)
+# Advisory (Gemini + Grok + fallback)
 # --------------------------------------------------------------------------- #
 
 
@@ -412,7 +438,7 @@ def _fallback_advisory(drought: float, flood: float, crop: str, stage: str) -> d
     }
 
 
-def _build_gemini_prompt(req: AdvisoryRequest, summary: str) -> str:
+def _build_advisory_prompt(req: AdvisoryRequest, summary: str) -> str:
     return (
         "You are an agronomy assistant for smallholder farmers in Telangana, India.\n"
         f"Detected risk summary: {summary}\n"
@@ -440,17 +466,22 @@ def _try_gemini_advisory(req: AdvisoryRequest, fallback: dict[str, Any]) -> dict
         return fallback
 
     summary = fallback["summary"]
-    prompt = _build_gemini_prompt(req, summary)
+    prompt = _build_advisory_prompt(req, summary)
 
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        import anyio
-        response = anyio.from_thread.run_sync(
-            lambda: client.models.generate_content(model=GEMINI_MODEL, contents=prompt),
-            timeout=GEMINI_TIMEOUT,
-        )
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                lambda: client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+            )
+            response = future.result(timeout=GEMINI_TIMEOUT)
         text = response.text if hasattr(response, "text") else str(response)
-    except Exception as exc:  # broad: covers timeout, rate-limit, http, parse
+    except FuturesTimeout:
+        logger.warning("Gemini advisory timed out after %.0fs – using fallback.", GEMINI_TIMEOUT)
+        return fallback
+    except Exception as exc:  # broad: covers rate-limit, http, auth, parse
         logger.warning("Gemini advisory failed (%s) – using fallback.", type(exc).__name__)
         return fallback
 
@@ -471,6 +502,73 @@ def _try_gemini_advisory(req: AdvisoryRequest, fallback: dict[str, Any]) -> dict
     except Exception:
         logger.warning("Gemini returned unparseable JSON – using fallback advisory.")
         return fallback
+
+
+def _try_grok_advisory(req: AdvisoryRequest, fallback: dict[str, Any]) -> dict[str, Any]:
+    """Attempt Grok (xAI); on any failure return the fallback advisory."""
+    if not XAI_API_KEY:
+        logger.warning("XAI_API_KEY not set – cannot use Grok provider.")
+        return fallback
+
+    summary = fallback["summary"]
+    prompt = _build_advisory_prompt(req, summary)
+
+    try:
+        with httpx.Client(timeout=XAI_TIMEOUT) as client:
+            resp = client.post(
+                XAI_API_URL,
+                headers={
+                    "Authorization": f"Bearer {XAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": XAI_MODEL,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are an agronomy assistant. Return only valid JSON, no markdown.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 800,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        text = data["choices"][0]["message"]["content"]
+    except Exception as exc:
+        logger.warning("Grok advisory failed (%s) – using fallback.", type(exc).__name__)
+        return fallback
+
+    try:
+        clean = text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean
+            clean = clean.rsplit("```", 1)[0]
+        parsed = json.loads(clean)
+        if not all(k in parsed for k in ("summary", "recommendations_en", "recommendations_te")):
+            raise ValueError("missing keys")
+        if not (isinstance(parsed["recommendations_en"], list) and isinstance(parsed["recommendations_te"], list)):
+            raise ValueError("recommendations must be lists")
+        parsed["source"] = "grok"
+        return parsed
+    except Exception:
+        logger.warning("Grok returned unparseable JSON – using fallback advisory.")
+        return fallback
+
+
+def _try_ai_advisory(req: AdvisoryRequest, fallback: dict[str, Any]) -> dict[str, Any]:
+    """Route to the configured AI provider; fall back if the key is missing or the call fails."""
+    provider = AI_PROVIDER
+    if provider == "grok":
+        logger.info("Advisory provider: grok")
+        return _try_grok_advisory(req, fallback)
+    if provider == "gemini":
+        logger.info("Advisory provider: gemini")
+        return _try_gemini_advisory(req, fallback)
+    logger.warning("Unknown AI_PROVIDER '%s' – using fallback advisory.", provider)
+    return fallback
 
 
 # --------------------------------------------------------------------------- #
@@ -501,7 +599,9 @@ async def health() -> dict[str, Any]:
         "status": "ok",
         "service": "krishipulse-ai",
         "models_trained": list(MODELS.keys()),
+        "ai_provider": AI_PROVIDER,
         "gemini_configured": bool(GEMINI_API_KEY),
+        "grok_configured": bool(XAI_API_KEY),
         "cors_origins": CORS_ORIGINS,
     }
 
@@ -613,7 +713,7 @@ async def simulate(req: SimulateRequest) -> dict[str, Any]:
 async def advisory(req: AdvisoryRequest) -> dict[str, Any]:
     _validate_crop_stage(req.crop, req.growth_stage)
     fallback = _fallback_advisory(req.drought_risk, req.flood_risk, req.crop, req.growth_stage)
-    result = _try_gemini_advisory(req, fallback)
+    result = _try_ai_advisory(req, fallback)
     return result
 
 

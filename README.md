@@ -128,18 +128,23 @@ git remote add origin https://github.com/YOUR_USERNAME/krishipulse-ai.git
 git push -u origin main
 ```
 
-### 2. Render (Backend)
+### 2. Railway (Backend)
 
-1. Go to [render.com](https://render.com) → New → **Web Service**
+1. Go to [railway.app](https://railway.app) → New Project → **Deploy from GitHub repo**
 2. Connect your GitHub repo
 3. Settings:
    - **Root Directory**: `backend`
    - **Build Command**: `pip install -r requirements.txt`
    - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-   - **Environment Variables**:
-     - `GEMINI_API_KEY` (optional, for AI advisory)
+   - **Environment Variables** (see table below):
+     - `AI_PROVIDER` = `gemini` (or `grok`)
+     - `GEMINI_API_KEY` (required if `AI_PROVIDER=gemini`)
+     - `XAI_API_KEY` (required if `AI_PROVIDER=grok`)
      - `CORS_ORIGINS` = `https://your-app.vercel.app,http://localhost:5173`
-4. Deploy. Note the URL: `https://krishipulse-ai.onrender.com`
+4. Deploy. Note the generated URL: `https://krishipulse-ai.up.railway.app`
+
+> **Railway Note:** Railway sets `$PORT` automatically (typically 8000). The
+> start command reads it via `os.getenv("PORT")`.
 
 ### 3. Vercel (Frontend)
 
@@ -149,10 +154,10 @@ git push -u origin main
    - **Framework Preset**: Vite
    - **Root Directory**: `.` (project root)
    - **Environment Variables**:
-     - `VITE_API_URL` = `https://krishipulse-ai.onrender.com`
+     - `VITE_API_URL` = `https://krishipulse-ai.up.railway.app`
 4. Deploy.
 
-The `vercel.json` handles SPA routing. Update `CORS_ORIGINS` on Render to include your Vercel URL.
+The `vercel.json` handles SPA routing. Update `CORS_ORIGINS` on Railway to include your actual Vercel URL.
 
 ---
 
@@ -160,10 +165,12 @@ The `vercel.json` handles SPA routing. Update `CORS_ORIGINS` on Render to includ
 
 | Variable | Where | Required | Description |
 |----------|-------|----------|-------------|
-| `VITE_API_URL` | Vercel (frontend) | Yes | Backend URL |
-| `GEMINI_API_KEY` | Render (backend) | No | Google Gemini API key for AI advisory |
-| `CORS_ORIGINS` | Render (backend) | Yes | Comma-separated allowed origins |
-| `PORT` | Render (backend) | Auto | Set by Render |
+| `VITE_API_URL` | Vercel (frontend) | Yes | Railway backend URL |
+| `AI_PROVIDER` | Railway (backend) | No | `gemini` (default) or `grok` |
+| `GEMINI_API_KEY` | Railway (backend) | No | Google Gemini API key (when `AI_PROVIDER=gemini`) |
+| `XAI_API_KEY` | Railway (backend) | No | xAI Grok API key (when `AI_PROVIDER=grok`) |
+| `CORS_ORIGINS` | Railway (backend) | Yes | Comma-separated allowed origins |
+| `PORT` | Railway (backend) | Auto | Set by Railway |
 
 **Never commit `.env` files.** Add `.env` to `.gitignore`.
 
@@ -183,6 +190,7 @@ The `vercel.json` handles SPA routing. Update `CORS_ORIGINS` on Render to includ
 
 - [Open-Meteo](https://open-meteo.com/) — Weather and soil moisture data
 - [scikit-learn](https://scikit-learn.org/) — Random Forest implementation
-- [Google Gemini API](https://ai.google.dev/) — AI agricultural advisory
+- [Google Gemini API](https://ai.google.dev/) — AI agricultural advisory (default provider)
+- [xAI Grok API](https://x.ai/) — Alternative AI advisory provider
 - [React-Leaflet](https://react-leaflet.js.org/) & [Leaflet](https://leafletjs.com/) — Interactive mapping
 - [OpenStreetMap](https://www.openstreetmap.org/) — Map tiles
