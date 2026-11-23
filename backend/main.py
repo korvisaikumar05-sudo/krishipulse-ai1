@@ -45,7 +45,7 @@ OPEN_METEO_TIMEOUT = 15.0  # seconds
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_TIMEOUT = 20.0
-GEMINI_MODEL = "gemini-2.0-flash-001"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").strip().lower()
 
