@@ -37,7 +37,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("krishipulse")
 
 # CORS – comma-separated origins from env, default to permissive for local dev.
-_default_origins = "http://localhost:5173,http://127.0.0.1:5173,https://krishipulse.vercel.app"
+_default_origins = "http://localhost:5173,http://127.0.0.1:5173"
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", _default_origins).split(",") if o.strip()]
 
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
